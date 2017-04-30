@@ -27,13 +27,6 @@ const DEBUG = false;
  * 	    Bob Richardson's Double Dummy Solver
  * 	    Ray Spalding's Bridge Composer
  *
- * Notes:
- * To create a PBN of the handrecord is pretty trivial,
- * consisting of formatting and combining the spades,
- * hearts, diamonds, and clubs for each direction.
- *
- * Creating a "personalized PBN" was considerably more challenging.
- *
  * In an attempt to reduce execution time, only one ACBL Live API
  * is called: the tournament/session API
  */
@@ -57,10 +50,7 @@ const DEBUG = false;
 
 
    if (!is_null($acbl_number)) {
-
-	   //$event_json = json_decode(file_get_contents($event_url));
 	   $pair_info = getPairInfo($sess_json,$acbl_number);
-	   //print_r($pair_info);
 	   if (!is_null($pair_info)) {
 		   $orientation = ($pair_info->orientation === 'N-S')  ? 'NS' : 'EW';
 		   //$pair_id="&pair_number=2&orientation=e-w&section_label=r";
@@ -154,6 +144,13 @@ const DEBUG = false;
     $site .= '[Site "'.$sess_json->tournament->name.'"]';
     $date .= '[Date "'.$fmtdate.'"]';
 
+    if (empty($sess_json->handrecord)) { 
+	$content .= $event.EOL;
+	$content .= $site.EOL;
+	$content .= $date.EOL;
+        $content .= '% NO HANDRECORD DATA FOUND!' . EOL;
+    }
+
     foreach ($sess_json->handrecord as $bd)  {
 	if ($personalized_pbn && is_null($pairResults = getPairResults($pair_results_table, $bd->board_number))) {continue;}
 	$content .= $event.EOL;
@@ -201,8 +198,14 @@ const DEBUG = false;
 		$content .= '[ScorePercentage "' . str_replace("-","",$bd_orientation) . ' ' . $pairResults->percentage .'"]'.EOL;
 		$declarer =  ucfirst($pairResults->declarer);
 		$content .= '[Declarer "' . $declarer[0] .'"]'.EOL;
-		$content .= '[Contract "' . $pairResults->contract .'"]'.EOL;
 
+		$contract = $pairResults->contract;
+		// It looks like there is a slight chance for a problem if the opponent declarer
+		// could be assigned a score that is not 0-(fixed_player score) 
+		// Note that AVG+ or AVG- is usually not a problem because there is 
+		// no declarer, so making the score fixed_player-centric is OK.
+		// Non-complementary scores should be okay in the ScoreTable
+		// because both scores are available
 		if (is_numeric($pairResults->score)) {
 			// if the side that declared  got a plus score, the contract made
 			// score must be declarer score, not the pairs
@@ -215,8 +218,14 @@ const DEBUG = false;
 				$declarer_score = -$pairResults->score;
 			}
 		} else { // could be PASS, AVE+, AVE-
-			$declarer_score = $pairResults->score;
+			if ($pairResults->score === "PASS") {
+				$contract = "PASS";
+				$declarer_score = 0;
+			} else {
+				$declarer_score = $pairResults->score;
+			}
 		}
+		$content .= '[Contract "' . $contract .'"]'.EOL;
 		$content .= '[Score "' . $declarer_score .'"]'.EOL;
 
 		$tricks = determineTricks($pairResults->contract,isVul($vul,$declarer),
@@ -290,8 +299,8 @@ function getPairResults ($arr, $board_number) {
 	return  NULL;
 }
 
-// The pair info we need (that could have been extracted from
-// the Pair API, is mostly given in any board the pair plays.
+// The pair info we need (this could have been extracted from
+// the Pair API), is mostly given in any board the pair plays.
 // The exception is this does not include the section label.
 // So, we geet that from the section header and add it to 
 // what we are calling the info object.
@@ -506,9 +515,7 @@ function getBoardOrientation ($arr, $board_number, $player_number) {
 	return  "";
 }
 
-// We have the table of results for the section we are interested in.
-// Now, create a sorted table of just the boards the fixed_pair played.
-// We need both copies (NS and EW orientation) of the results
+// We need both copies (NS and EW orientation) of all results for this board
 // Note:  a ScoreTable row consists of
 //    Section  PairID_NS  PairID_EW Contract Declarer Result(tricks) Score_NS Score_EW MP_NS MP_EW Names_NS Names_EW
 function getScoreTable ($section_label, $arr, $board_number, $vul) {
@@ -520,8 +527,11 @@ function getScoreTable ($section_label, $arr, $board_number, $vul) {
 			$str .= $section_label .  ' ';
 			$str .= sprintf("%-2d %-2d",  $results->pair_number, 
 				$EWresults->pair_number);
-			// if there is no score (empty string), use hyphen as a place holder
-			$str .= sprintf(" %-4s", $results->contract ? $results->contract : "-");
+			
+			$contract = $results->contract;
+			if ($results->score === "PASS") {$contract = "PASS";}
+			// if there is no contract (empty string), use hyphen as a place holder
+			$str .= sprintf(" %-4s", $contract ? $contract : "-");
 
 			// if there is no declarer (empty string), use hyphen as a place holder
 			$str .= sprintf(" %1s", $results->declarer ? ucfirst($results->declarer)[0] : '-');
@@ -530,14 +540,18 @@ function getScoreTable ($section_label, $arr, $board_number, $vul) {
 					madeContract(ucfirst($results->declarer)[0], $results->score), 
 					$results->score);
 			if ($tricks == 0) {
-				$str .= ' -';
+				$str .= '  -';
 			} else {
 				$str .= sprintf(" %2d", $tricks);
 			}
-			$str .= is_numeric($results->score) ?
-					sprintf(" %5d", $results->score) : sprintf(" %-5s", $results->score); 
-			$str .= is_numeric($EWresults->score) ?
-					sprintf(" %5d", $EWresults->score) : sprintf(" %-5s", $EWresults->score); 
+			$score = $results->score;
+			if ($score === "PASS") {$score = 0;}
+			$str .= is_numeric($score) ?
+					sprintf(" %5d", $score) : sprintf(" %5s", $score); 
+			$score = $EWresults->score;
+			if ($score === "PASS") {$score = 0;}
+			$str .= is_numeric($score) ?
+					sprintf(" %5d", $score) : sprintf(" %5s", $score); 
 			$str .= sprintf(" %-5.2f %5.2f",
 					$results->match_points, $EWresults->match_points);
 			$str .= sprintf(" %-30s", formatName($results->pair_names[0])
@@ -658,4 +672,4 @@ function resultsTable($dir, $double_dummy_makes) {
 
 <body>
 </body>
-</html>
+
